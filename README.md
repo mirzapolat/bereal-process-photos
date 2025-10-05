@@ -1,1 +1,0 @@
-# bereal-process-photos
