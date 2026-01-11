@@ -79,3 +79,6 @@ __combined/
 ## Notes
 - If you enable JPEG conversion, any leftover WebP files in the output folders are removed at the end.
 - If a destination folder already exists, the script adds a numeric suffix like `__processed_1`.
+
+## Credits
+This was originally forked from [hatobi/bereal-gdpr-photo-toolkit](https://github.com/hatobi/bereal-gdpr-photo-toolkit) and then modified to suit my need better.
