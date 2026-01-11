@@ -81,4 +81,4 @@ __combined/
 - If a destination folder already exists, the script adds a numeric suffix like `__processed_1`.
 
 ## Credits
-This was originally forked from [hatobi/bereal-gdpr-photo-toolkit](https://github.com/hatobi/bereal-gdpr-photo-toolkit) and then modified to suit my need better.
+This was originally forked from [hatobi/bereal-gdpr-photo-toolkit](https://github.com/hatobi/bereal-gdpr-photo-toolkit) and then modified.
