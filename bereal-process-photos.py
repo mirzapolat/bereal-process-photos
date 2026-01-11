@@ -44,32 +44,45 @@ processed_files_count = 0
 converted_files_count = 0
 combined_files_count = 0
 skipped_files_count = 0
+skipped_entries_by_date_count = 0
 
 # Static IPTC tags
 source_app = "BeReal app"
 processing_tool = "github/bereal-gdpr-photo-toolkit"
 #keywords = ["BeReal"]
 
+def configure_logging(verbose_logging):
+    level = logging.INFO if verbose_logging == 'yes' else logging.WARNING
+    logger.setLevel(level)
+    for log_handler in logger.handlers:
+        log_handler.setLevel(level)
+
 # Define lists to hold the paths of images to be combined
 primary_images = []
 secondary_images = []
+processed_output_paths = []
 
 # Define paths using pathlib
 photo_folder = Path('Photos/post/')
 bereal_folder = Path('Photos/bereal')
 output_folder = Path('Photos/post/__processed')
 output_folder_combined = Path('Photos/post/__combined')
+script_dir = Path(__file__).resolve().parent
 output_folder.mkdir(parents=True, exist_ok=True)  # Create the output folder if it doesn't exist
 
 # Print the paths
-print(STYLING["BOLD"] + "\nThe following paths are set for the input and output files:" + STYLING["RESET"])
-print(f"Photo folder: {photo_folder}")
+startup_preamble_lines = [
+    STYLING["BOLD"] + "\nThe following paths are set for the input and output files:" + STYLING["RESET"],
+    f"Photo folder: {photo_folder}",
+]
 if os.path.exists(bereal_folder):
-    print(f"Older photo folder: {bereal_folder}")
-print(f"Output folder for singular images: {output_folder}")
-print(f"Output folder for combined images: {output_folder_combined}")
-#print("\nDeduplication is active. No files will be overwritten or deleted.")
-print("")
+    startup_preamble_lines.append(f"Older photo folder: {bereal_folder}")
+startup_preamble_lines.extend([
+    f"Output folder for singular images (temporary): {output_folder}",
+    f"Output folder for combined images (temporary): {output_folder_combined}",
+    f"Final output location: {script_dir}",
+    ""
+])
 
 # Function to count number of input files
 def count_files_in_folder(folder_path):
@@ -78,57 +91,166 @@ def count_files_in_folder(folder_path):
     return file_count
 
 number_of_files = count_files_in_folder(photo_folder)
-print(f"Number of WebP-files in {photo_folder}: {number_of_files}")
+startup_preamble_lines.append(f"Number of WebP-files in {photo_folder}: {number_of_files}")
 
 if os.path.exists(bereal_folder):
     number_of_files = count_files_in_folder(bereal_folder)
-    print(f"Number of (older) WebP-files in {bereal_folder}: {number_of_files}")
+    startup_preamble_lines.append(f"Number of (older) WebP-files in {bereal_folder}: {number_of_files}")
+
+startup_preamble = "\n".join(startup_preamble_lines)
 
 # Settings
-## Initial choice for accessing advanced settings
-print(STYLING["BOLD"] + "\nDo you want to access advanced settings or run with default settings?" + STYLING["RESET"])
-print("Default settings are:\n"
-"1. Copied images are converted from WebP to JPEG\n"
-"2. Converted images' filenames do not contain the original filename\n"
-"3. Combined images are created on top of converted, singular images")
-advanced_settings = input("\nEnter " + STYLING["BOLD"] + "'yes'" + STYLING["RESET"] + "for advanced settings or press any key to continue with default settings: ").strip().lower()
-
-if advanced_settings != 'yes':
-    print("Continuing with default settings.\n")
-
 ## Default responses
 convert_to_jpeg = 'yes'
 keep_original_filename = 'no'
 create_combined_images = 'yes'
+since_date = None
+delete_processed_files_after_combining = 'yes'
+use_verbose_logging = 'no'
 
-## Proceed with advanced settings if chosen
-if advanced_settings == 'yes':
-    # User choice for converting to JPEG
-    convert_to_jpeg = None
-    while convert_to_jpeg not in ['yes', 'no']:
-        convert_to_jpeg = input(STYLING["BOLD"] + "\n1. Do you want to convert images from WebP to JPEG? (yes/no): " + STYLING["RESET"]).strip().lower()
-        if convert_to_jpeg == 'no':
-            print("Your images will not be converted. No additional metadata will be added.")
-        if convert_to_jpeg not in ['yes', 'no']:
-            logging.error("Invalid input. Please enter 'yes' or 'no'.")
+def format_since_date(value):
+    if value is None:
+        return "all time"
+    return value.strftime("%Y-%m-%d")
 
-    # User choice for keeping original filename
-    print(STYLING["BOLD"] + "\n2. There are two options for how output files can be named" + STYLING["RESET"] + "\n"
-    "Option 1: YYYY-MM-DDTHH-MM-SS_primary/secondary_original-filename.jpeg\n"
-    "Option 2: YYYY-MM-DDTHH-MM-SS_primary/secondary.jpeg\n"
-    "This will only influence the naming scheme of singular images.")
-    keep_original_filename = None
-    while keep_original_filename not in ['yes', 'no']:
-        keep_original_filename = input(STYLING["BOLD"] + "Do you want to keep the original filename in the renamed file? (yes/no): " + STYLING["RESET"]).strip().lower()
-        if keep_original_filename not in ['yes', 'no']:
-            logging.error("Invalid input. Please enter 'yes' or 'no'.")
+def format_output_style(verbose_logging):
+    if verbose_logging == 'yes':
+        return "extensive logs"
+    return "progress bars"
 
-    # User choice for creating combined images
-    create_combined_images = None
-    while create_combined_images not in ['yes', 'no']:
-        create_combined_images = input(STYLING["BOLD"] + "\n3. Do you want to create combined images like the original BeReal memories? (yes/no): " + STYLING["RESET"]).strip().lower()
-        if create_combined_images not in ['yes', 'no']:
-            logging.error("Invalid input. Please enter 'yes' or 'no'.")
+def output_status(message):
+    if use_verbose_logging == 'yes':
+        print(message)
+
+def render_progress(current, total, label):
+    if total <= 0:
+        return
+    bar_length = 34
+    label_width = 18
+    count_width = len(str(total))
+    filled_length = int(bar_length * current / total)
+    if filled_length <= 0:
+        bar = "." * bar_length
+    elif filled_length >= bar_length:
+        bar = "=" * bar_length
+    else:
+        bar = "=" * (filled_length - 1) + ">" + "." * (bar_length - filled_length)
+    percent = int((current / total) * 100)
+    label_text = f"{label:<{label_width}}"
+    count_text = f"{current:>{count_width}}/{total}"
+    print(f"\r{label_text} [{bar}] {count_text} ({percent:3d}%)", end="", flush=True)
+    if current >= total:
+        print("")
+
+def output_summary(summary_text, verbose_logging):
+    if verbose_logging == 'yes':
+        logging.info(summary_text)
+    else:
+        print(STYLING["BLUE"] + STYLING["BOLD"] + summary_text + STYLING["RESET"])
+
+print(startup_preamble)
+print(STYLING["BOLD"] + "\nStartup settings (current values):" + STYLING["RESET"])
+print(
+    f"1. Convert images from WebP to JPEG (current: {convert_to_jpeg})\n"
+    f"2. Keep original filename in renamed file (current: {keep_original_filename})\n"
+    f"3. Create combined images like BeReal memories (current: {create_combined_images})\n"
+    f"4. Start date filter (current: {format_since_date(since_date)})\n"
+    f"5. Delete processed single files after combining (current: {delete_processed_files_after_combining})\n"
+    f"6. Output style (current: {format_output_style(use_verbose_logging)})"
+)
+
+selection_input = input("\nEnter a setting number to change or press Enter to continue: ").strip()
+if selection_input == "":
+    print("Continuing with selected settings.\n")
+else:
+    while True:
+        if not selection_input.isdigit() or not 1 <= int(selection_input) <= 6:
+            logging.error("Invalid selection. Enter a number between 1 and 6.")
+            selection_input = input("Enter a setting number (1-6) or press Enter to continue: ").strip()
+            if selection_input == "":
+                print("Continuing with selected settings.\n")
+                break
+            continue
+
+        selection = int(selection_input)
+
+        if selection == 1:
+            # User choice for converting to JPEG
+            convert_to_jpeg = None
+            while convert_to_jpeg not in ['yes', 'no']:
+                convert_to_jpeg = input(STYLING["BOLD"] + "\n1. Do you want to convert images from WebP to JPEG? (yes/no): " + STYLING["RESET"]).strip().lower()
+                if convert_to_jpeg == 'no':
+                    print("Your images will not be converted. No additional metadata will be added.")
+                if convert_to_jpeg not in ['yes', 'no']:
+                    logging.error("Invalid input. Please enter 'yes' or 'no'.")
+
+        if selection == 2:
+            # User choice for keeping original filename
+            print(STYLING["BOLD"] + "\n2. There are two options for how output files can be named" + STYLING["RESET"] + "\n"
+            "Option 1: YYYY-MM-DDTHH-MM-SS_primary/secondary_original-filename.jpeg\n"
+            "Option 2: YYYY-MM-DDTHH-MM-SS_primary/secondary.jpeg\n"
+            "This will only influence the naming scheme of singular images.")
+            keep_original_filename = None
+            while keep_original_filename not in ['yes', 'no']:
+                keep_original_filename = input(STYLING["BOLD"] + "Do you want to keep the original filename in the renamed file? (yes/no): " + STYLING["RESET"]).strip().lower()
+                if keep_original_filename not in ['yes', 'no']:
+                    logging.error("Invalid input. Please enter 'yes' or 'no'.")
+
+        if selection == 3:
+            # User choice for creating combined images
+            create_combined_images = None
+            while create_combined_images not in ['yes', 'no']:
+                create_combined_images = input(STYLING["BOLD"] + "\n3. Do you want to create combined images like the original BeReal memories? (yes/no): " + STYLING["RESET"]).strip().lower()
+                if create_combined_images not in ['yes', 'no']:
+                    logging.error("Invalid input. Please enter 'yes' or 'no'.")
+
+        if selection == 4:
+            # User choice for date cutoff
+            print(STYLING["BOLD"] + "\n4. Do you want to filter by a start date?" + STYLING["RESET"])
+            while True:
+                date_input = input("Enter a start date (YYYY-MM-DD) or press Enter for all time: ").strip()
+                if date_input == "":
+                    since_date = None
+                    break
+                try:
+                    since_date = datetime.strptime(date_input, "%Y-%m-%d").date()
+                    break
+                except ValueError:
+                    logging.error("Invalid date format. Please use YYYY-MM-DD or press Enter for all time.")
+
+        if selection == 5:
+            # User choice for deleting processed single files
+            delete_processed_files_after_combining = None
+            while delete_processed_files_after_combining not in ['yes', 'no']:
+                delete_processed_files_after_combining = input(STYLING["BOLD"] + "\n5. Delete processed single files after combining? (yes/no) [default: yes]: " + STYLING["RESET"]).strip().lower()
+                if delete_processed_files_after_combining == "":
+                    delete_processed_files_after_combining = 'yes'
+                if delete_processed_files_after_combining not in ['yes', 'no']:
+                    logging.error("Invalid input. Please enter 'yes' or 'no'.")
+
+        if selection == 6:
+            # User choice for output style
+            use_verbose_logging = None
+            while use_verbose_logging not in ['yes', 'no']:
+                use_verbose_logging = input(STYLING["BOLD"] + "\n6. Use extensive logs instead of progress bars? (yes/no) [default: no]: " + STYLING["RESET"]).strip().lower()
+                if use_verbose_logging == "":
+                    use_verbose_logging = 'no'
+                if use_verbose_logging not in ['yes', 'no']:
+                    logging.error("Invalid input. Please enter 'yes' or 'no'.")
+
+        selection_input = input("\nChange another setting? Enter a number (1-6) or press Enter to start processing: ").strip()
+        if selection_input == "":
+            print("Continuing with selected settings.\n")
+            break
+        if not selection_input.isdigit() or not 1 <= int(selection_input) <= 6:
+            logging.error("Invalid selection. Enter a number between 1 and 6 or press Enter to start processing.")
+            selection_input = input("Enter a setting number (1-6) or press Enter to start processing: ").strip()
+            if selection_input == "":
+                print("Continuing with selected settings.\n")
+                break
+
+use_progress_bars = use_verbose_logging != 'yes'
+configure_logging(use_verbose_logging)
 
 if convert_to_jpeg == 'no' and create_combined_images == 'no':
     print("You chose not to convert images nor do you want to output combined images.\n"
@@ -304,6 +426,8 @@ def combine_images_with_resizing(primary_path, secondary_path):
 
 # Function to clean up backup files left behind by iptcinfo3
 def remove_backup_files(directory):
+    if not os.path.exists(directory):
+        return
     # List all files in the given directory
     for filename in os.listdir(directory):
         # Check if the filename ends with '~'
@@ -313,9 +437,58 @@ def remove_backup_files(directory):
             try:
                 # Remove the file
                 os.remove(file_path)
-                print(f"Removed backup file: {file_path}")
+                logging.info(f"Removed backup file: {file_path}")
             except Exception as e:
-                print(f"Failed to remove backup file {file_path}: {e}")
+                logging.error(f"Failed to remove backup file {file_path}: {e}")
+
+def remove_webp_files(directory):
+    if not os.path.exists(directory):
+        return
+    for filename in os.listdir(directory):
+        if filename.lower().endswith('.webp'):
+            file_path = os.path.join(directory, filename)
+            try:
+                os.remove(file_path)
+                logging.info(f"Removed WebP file: {file_path}")
+            except Exception as e:
+                logging.error(f"Failed to remove WebP file {file_path}: {e}")
+
+def delete_processed_files(processed_paths):
+    for path in set(processed_paths):
+        try:
+            if path.exists():
+                path.unlink()
+                logging.info(f"Deleted processed file: {path}")
+        except Exception as e:
+            logging.error(f"Failed to delete processed file {path}: {e}")
+
+def remove_empty_directory(directory):
+    try:
+        if directory.exists() and directory.is_dir() and not any(directory.iterdir()):
+            directory.rmdir()
+            logging.info(f"Removed empty directory: {directory}")
+    except Exception as e:
+        logging.error(f"Failed to remove empty directory {directory}: {e}")
+
+def move_directory_to_script_dir(src_directory):
+    try:
+        if not src_directory.exists():
+            return
+        if src_directory.resolve().parent == script_dir:
+            return
+        destination = script_dir / src_directory.name
+        if destination.exists():
+            counter = 1
+            while True:
+                candidate = script_dir / f"{src_directory.name}_{counter}"
+                if not candidate.exists():
+                    destination = candidate
+                    break
+                counter += 1
+        shutil.move(str(src_directory), str(destination))
+        logging.info(f"Moved folder to: {destination}")
+    except Exception as e:
+        logging.error(f"Failed to move folder {src_directory}: {e}")
 
 # Load the JSON file
 try:
@@ -325,8 +498,24 @@ except FileNotFoundError:
     logging.error("JSON file not found. Please check the path.")
     exit()
 
-# Process files
+filtered_entries = []
 for entry in data:
+    try:
+        taken_at = datetime.strptime(entry['takenAt'], "%Y-%m-%dT%H:%M:%S.%fZ")
+        if since_date and taken_at.date() < since_date:
+            skipped_entries_by_date_count += 1
+            logging.info(f"Skipping entry from {taken_at.date()} before {since_date}.")
+            continue
+        filtered_entries.append((entry, taken_at))
+    except Exception as e:
+        logging.error(f"Error reading entry {entry}: {e}")
+
+total_entries = len(filtered_entries)
+if use_progress_bars and total_entries == 0:
+    output_status("No entries to process.")
+
+# Process files
+for entry_index, (entry, taken_at) in enumerate(filtered_entries, start=1):
     try:
         # Extract only the filename from the path and then append it to the photo_folder path
         primary_filename = Path(entry['primary']['path']).name
@@ -338,8 +527,6 @@ for entry in data:
         if not os.path.exists(primary_path):
             primary_path = bereal_folder / primary_filename
             secondary_path = bereal_folder / secondary_filename
-
-        taken_at = datetime.strptime(entry['takenAt'], "%Y-%m-%dT%H:%M:%S.%fZ")
         location = entry.get('location')  # This will be None if 'location' is not present
         caption = entry.get('caption')  # This will be None if 'caption' is not present
 
@@ -385,6 +572,7 @@ for entry in data:
                 update_iptc(image_path_str, caption)
             else:
                 shutil.copy2(path, new_path) # Copy to new path
+            processed_output_paths.append(new_path)
 
             if role == 'primary':
                 primary_images.append({
@@ -398,16 +586,24 @@ for entry in data:
 
             logging.info(f"Sucessfully processed {role} image.")
             processed_files_count += 1
-            print("")
+            if use_verbose_logging == 'yes':
+                print("")
     except Exception as e:
         logging.error(f"Error processing entry {entry}: {e}")
+    finally:
+        if use_progress_bars and total_entries > 0:
+            render_progress(entry_index, total_entries, "Processing entries")
 
 # Create combined images if user chose 'yes'
 if create_combined_images == 'yes':
     #Create output folder if it doesn't exist
     output_folder_combined.mkdir(parents=True, exist_ok=True)
 
-    for primary_path, secondary_path in zip(primary_images, secondary_images):
+    total_combined = len(primary_images)
+    if use_progress_bars and total_combined == 0:
+        output_status("No combined images to create.")
+
+    for combined_index, (primary_path, secondary_path) in enumerate(zip(primary_images, secondary_images), start=1):
         # Extract metadata from one of the images for consistency
         #taken_at = datetime.strptime(timestamp, "%Y-%m-%dT%H-%M-%S")
         primary_new_path = primary_path['path']
@@ -443,13 +639,59 @@ if create_combined_images == 'yes':
 
             if converted_path is None:
                 logging.error(f"Failed to convert combined image to JPEG: {combined_image_path}")
+        if use_verbose_logging == 'yes':
+            print("")
+        if use_progress_bars and total_combined > 0:
+            render_progress(combined_index, total_combined, "Combining images")
+
+if create_combined_images == 'yes' and delete_processed_files_after_combining == 'yes':
+    output_status(STYLING['BOLD'] + "Deleting processed single images" + STYLING["RESET"])
+    delete_processed_files(processed_output_paths)
+    remove_backup_files(output_folder)
+    remove_empty_directory(output_folder)
+    if use_verbose_logging == 'yes':
+        print("")
+elif delete_processed_files_after_combining == 'yes':
+    output_status(STYLING['BOLD'] + "Skipping deletion of single images because combined images were not created" + STYLING["RESET"])
+    if use_verbose_logging == 'yes':
         print("")
 
 # Clean up backup files
-print(STYLING['BOLD'] + "Removing backup files left behind by iptcinfo3" + STYLING["RESET"])
+output_status(STYLING['BOLD'] + "Removing backup files left behind by iptcinfo3" + STYLING["RESET"])
 remove_backup_files(output_folder)
 if create_combined_images == 'yes': remove_backup_files(output_folder_combined)
-print("")
+if use_verbose_logging == 'yes':
+    print("")
+
+if convert_to_jpeg == 'yes':
+    output_status(STYLING['BOLD'] + "Removing WebP files from output folder" + STYLING["RESET"])
+    remove_webp_files(output_folder)
+    if create_combined_images == 'yes':
+        remove_webp_files(output_folder_combined)
+    if use_verbose_logging == 'yes':
+        print("")
+
+move_directory_to_script_dir(output_folder)
+move_directory_to_script_dir(output_folder_combined)
 
 # Summary
-logging.info(f"Finished processing.\nNumber of input-files: {number_of_files}\nTotal files processed: {processed_files_count}\nFiles converted: {converted_files_count}\nFiles skipped: {skipped_files_count}\nFiles combined: {combined_files_count}")
+summary_title = "Processing Summary"
+summary_label_width = 26
+summary_value_width = 8
+summary_width = summary_label_width + summary_value_width
+summary_dash_count = max(summary_width - len(summary_title) - 2, 0)
+summary_dash_left = summary_dash_count // 2
+summary_dash_right = summary_dash_count - summary_dash_left
+summary_lines = [
+    f"{'-' * summary_dash_left} {summary_title} {'-' * summary_dash_right}",
+    f"{'Input files':<{summary_label_width}}{number_of_files:>{summary_value_width}}",
+    f"{'Total files processed':<{summary_label_width}}{processed_files_count:>{summary_value_width}}",
+    f"{'Files converted':<{summary_label_width}}{converted_files_count:>{summary_value_width}}",
+    f"{'Files skipped':<{summary_label_width}}{skipped_files_count:>{summary_value_width}}",
+    f"{'Entries skipped by date':<{summary_label_width}}{skipped_entries_by_date_count:>{summary_value_width}}",
+    f"{'Files combined':<{summary_label_width}}{combined_files_count:>{summary_value_width}}",
+]
+summary_text = "\n".join(summary_lines)
+if use_progress_bars:
+    print("")
+output_summary(summary_text, use_verbose_logging)
