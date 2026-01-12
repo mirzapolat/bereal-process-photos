@@ -47,13 +47,14 @@ python -m pip install pillow piexif iptcinfo3
 
 Place your BeReal export files like this:
 ```
-berealscript/
+the-folder-you-downloaded/
   bereal-process-photos.py
   posts.json
   Photos/
     post/
-      (WebP images)
-    bereal/         (older images, optional)
+      (WebP images are here)
+    ...
+  ...
 ```
 
 ## Step 4: Run the script
